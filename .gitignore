@@ -4,3 +4,4 @@
 *.log
 *.test
 .env
+/configs/config.yaml

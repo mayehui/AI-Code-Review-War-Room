@@ -284,7 +284,16 @@ type mockReviewer struct {
 func (r *mockReviewer) ID() string   { return r.id }
 func (r *mockReviewer) Name() string { return r.name }
 
-func (r *mockReviewer) Review(_ context.Context, _ review.PromptInput) (review.ReviewerResult, error) {
+func (r *mockReviewer) Review(_ context.Context, input review.PromptInput) (review.ReviewerResult, error) {
+	if input.ConsensusJudge {
+		return review.ReviewerResult{
+			ReviewerID:       r.id,
+			ReviewerName:     r.name,
+			ConsensusReached: true,
+			ConsensusSummary: "Mock reviewers reached consensus.",
+			FinalFindings:    nil,
+		}, nil
+	}
 	return review.ReviewerResult{
 		ReviewerID:   r.id,
 		ReviewerName: r.name,

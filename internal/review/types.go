@@ -18,10 +18,11 @@ type ChangeRequest struct {
 }
 
 type PromptInput struct {
-	Request      ChangeRequest
-	Round        int
-	PeerReviews  []ReviewerResult
-	Instructions string
+	Request        ChangeRequest
+	Round          int
+	PeerReviews    []ReviewerResult
+	Instructions   string
+	ConsensusJudge bool
 }
 
 type Reviewer interface {
@@ -31,19 +32,38 @@ type Reviewer interface {
 }
 
 type Publisher interface {
-	Publish(ctx context.Context, report Report) error
+	Publish(ctx context.Context, event PublishEvent) error
+}
+
+type EventType string
+
+const (
+	EventJobStarted     EventType = "job_started"
+	EventReviewerResult EventType = "reviewer_result"
+	EventJudgeResult    EventType = "judge_result"
+	EventFinalReport    EventType = "final_report"
+)
+
+type PublishEvent struct {
+	Type   EventType      `json:"type"`
+	Report Report         `json:"report"`
+	Result ReviewerResult `json:"result,omitempty"`
 }
 
 type ReviewerResult struct {
-	ReviewerID   string    `json:"reviewer_id"`
-	ReviewerName string    `json:"reviewer_name"`
-	Round        int       `json:"round"`
-	Summary      string    `json:"summary"`
-	Findings     []Finding `json:"findings"`
-	Raw          string    `json:"raw,omitempty"`
-	Error        string    `json:"error,omitempty"`
-	Duration     string    `json:"duration"`
-	CreatedAt    time.Time `json:"created_at"`
+	ReviewerID        string    `json:"reviewer_id"`
+	ReviewerName      string    `json:"reviewer_name"`
+	Round             int       `json:"round"`
+	Summary           string    `json:"summary"`
+	Findings          []Finding `json:"findings"`
+	ConsensusReached  bool      `json:"consensus_reached,omitempty"`
+	ConsensusSummary  string    `json:"consensus_summary,omitempty"`
+	OpenDisagreements []string  `json:"open_disagreements,omitempty"`
+	FinalFindings     []Finding `json:"final_findings,omitempty"`
+	Raw               string    `json:"raw,omitempty"`
+	Error             string    `json:"error,omitempty"`
+	Duration          string    `json:"duration"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type Finding struct {
@@ -59,12 +79,15 @@ type Finding struct {
 }
 
 type Report struct {
-	JobID       string           `json:"job_id"`
-	Status      string           `json:"status"`
-	Request     ChangeRequest    `json:"request"`
-	Summary     string           `json:"summary"`
-	Findings    []Finding        `json:"findings"`
-	Rounds      []ReviewerResult `json:"rounds"`
-	StartedAt   time.Time        `json:"started_at"`
-	CompletedAt time.Time        `json:"completed_at"`
+	JobID             string           `json:"job_id"`
+	Status            string           `json:"status"`
+	Request           ChangeRequest    `json:"request"`
+	Summary           string           `json:"summary"`
+	Findings          []Finding        `json:"findings"`
+	Rounds            []ReviewerResult `json:"rounds"`
+	ConsensusReached  bool             `json:"consensus_reached,omitempty"`
+	ConsensusSummary  string           `json:"consensus_summary,omitempty"`
+	OpenDisagreements []string         `json:"open_disagreements,omitempty"`
+	StartedAt         time.Time        `json:"started_at"`
+	CompletedAt       time.Time        `json:"completed_at"`
 }

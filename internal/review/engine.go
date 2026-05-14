@@ -15,13 +15,15 @@ import (
 )
 
 type EngineConfig struct {
-	ServiceName    string
-	MaxDiffChars   int
-	DebateRounds   int
-	Reviewers      []Reviewer
-	JudgeID        string
-	Publishers     []Publisher
-	IgnorePatterns []string
+	ServiceName        string
+	MaxDiffChars       int
+	DebateRounds       int
+	ConsensusEnabled   bool
+	MaxConsensusRounds int
+	Reviewers          []Reviewer
+	JudgeID            string
+	Publishers         []Publisher
+	IgnorePatterns     []string
 }
 
 type Engine struct {
@@ -86,18 +88,25 @@ func (e *Engine) run(ctx context.Context, jobID string, req ChangeRequest, start
 }
 
 func (e *Engine) execute(ctx context.Context, jobID string, req ChangeRequest, started time.Time) (Report, error) {
+	if e.cfg.ConsensusEnabled {
+		return e.executeConsensus(ctx, jobID, req, started)
+	}
+	return e.executeLegacy(ctx, jobID, req, started)
+}
+
+func (e *Engine) executeLegacy(ctx context.Context, jobID string, req ChangeRequest, started time.Time) (Report, error) {
 	req.Diff = e.prepareDiff(req.Diff)
 	report := Report{JobID: jobID, Status: "running", Request: req, StartedAt: started}
 	e.store(report)
 
-	rounds := e.runRound(ctx, req, 1, nil, "Review independently. Do not assume other reviewers are correct.")
+	rounds := e.runRound(ctx, report, req, 1, nil, "Review independently. Do not assume other reviewers are correct.", false)
 	report.Rounds = append(report.Rounds, rounds...)
 	e.store(report)
 
 	latest := rounds
 	for round := 2; round <= e.cfg.DebateRounds+1; round++ {
 		instructions := "Reconsider the merge request after reading peer reviews. Confirm real issues, reject likely false positives, and add missed high-signal findings."
-		next := e.runRound(ctx, req, round, latest, instructions)
+		next := e.runRound(ctx, report, req, round, latest, instructions, false)
 		report.Rounds = append(report.Rounds, next...)
 		latest = next
 		e.store(report)
@@ -115,18 +124,75 @@ func (e *Engine) execute(ctx context.Context, jobID string, req ChangeRequest, s
 	report.CompletedAt = time.Now()
 	e.store(report)
 
-	for _, pub := range e.cfg.Publishers {
-		if err := pub.Publish(ctx, report); err != nil {
-			e.logger.Error("publish report", "job_id", jobID, "error", err)
-		}
-	}
+	e.publish(ctx, PublishEvent{Type: EventFinalReport, Report: report})
 	return report, nil
 }
 
-func (e *Engine) runRound(ctx context.Context, req ChangeRequest, round int, peers []ReviewerResult, instructions string) []ReviewerResult {
+func (e *Engine) executeConsensus(ctx context.Context, jobID string, req ChangeRequest, started time.Time) (Report, error) {
+	judge := e.judge()
+	if judge == nil {
+		return Report{JobID: jobID, Status: "failed", Request: req, StartedAt: started}, errors.New("consensus review requires a configured judge reviewer")
+	}
+
+	req.Diff = e.prepareDiff(req.Diff)
+	report := Report{JobID: jobID, Status: "running", Request: req, StartedAt: started}
+	e.store(report)
+	e.publish(ctx, PublishEvent{Type: EventJobStarted, Report: report})
+
+	maxRounds := e.cfg.MaxConsensusRounds
+	if maxRounds <= 0 {
+		maxRounds = 3
+	}
+
+	var latest []ReviewerResult
+	var lastJudge ReviewerResult
+	for round := 1; round <= maxRounds; round++ {
+		instructions := consensusRoundInstructions(round)
+		results := e.runRound(ctx, report, req, round, latest, instructions, true)
+		report.Rounds = append(report.Rounds, results...)
+		e.store(report)
+
+		lastJudge = e.runConsensusJudge(ctx, judge, req, report.Rounds, round)
+		report.Rounds = append(report.Rounds, lastJudge)
+		report.ConsensusSummary = lastJudge.ConsensusSummary
+		report.OpenDisagreements = lastJudge.OpenDisagreements
+		e.store(report)
+		e.publish(ctx, PublishEvent{Type: EventJudgeResult, Report: report, Result: lastJudge})
+
+		if lastJudge.ConsensusReached {
+			report.ConsensusReached = true
+			report.ConsensusSummary = firstNonEmpty(lastJudge.ConsensusSummary, lastJudge.Summary)
+			report.OpenDisagreements = nil
+			report.Findings = normalizeFindings(lastJudge.FinalFindings, lastJudge.ReviewerName)
+			report.Summary = buildConsensusSummary(e.cfg.ServiceName, report)
+			report.Status = "completed"
+			report.CompletedAt = time.Now()
+			e.store(report)
+			e.publish(ctx, PublishEvent{Type: EventFinalReport, Report: report})
+			return report, nil
+		}
+
+		latest = append([]ReviewerResult{}, results...)
+		latest = append(latest, lastJudge)
+	}
+
+	report.ConsensusReached = false
+	report.ConsensusSummary = firstNonEmpty(lastJudge.ConsensusSummary, lastJudge.Summary)
+	report.OpenDisagreements = lastJudge.OpenDisagreements
+	report.Findings = aggregateFindings(report.Rounds)
+	report.Summary = buildDisagreementSummary(e.cfg.ServiceName, report, maxRounds)
+	report.Status = "completed_with_disagreements"
+	report.CompletedAt = time.Now()
+	e.store(report)
+	e.publish(ctx, PublishEvent{Type: EventFinalReport, Report: report})
+	return report, nil
+}
+
+func (e *Engine) runRound(ctx context.Context, report Report, req ChangeRequest, round int, peers []ReviewerResult, instructions string, publishResults bool) []ReviewerResult {
 	var wg sync.WaitGroup
-	results := make([]ReviewerResult, len(e.cfg.Reviewers))
-	for i, reviewer := range e.cfg.Reviewers {
+	reviewers := e.roundReviewers()
+	results := make([]ReviewerResult, len(reviewers))
+	for i, reviewer := range reviewers {
 		wg.Add(1)
 		go func(i int, reviewer Reviewer) {
 			defer wg.Done()
@@ -151,10 +217,26 @@ func (e *Engine) runRound(ctx context.Context, req ChangeRequest, round int, pee
 			result.Duration = time.Since(start).String()
 			result.CreatedAt = time.Now()
 			results[i] = result
+			if publishResults {
+				e.publish(ctx, PublishEvent{Type: EventReviewerResult, Report: report, Result: result})
+			}
 		}(i, reviewer)
 	}
 	wg.Wait()
 	return results
+}
+
+func (e *Engine) roundReviewers() []Reviewer {
+	if !e.cfg.ConsensusEnabled || e.cfg.JudgeID == "" {
+		return e.cfg.Reviewers
+	}
+	reviewers := make([]Reviewer, 0, len(e.cfg.Reviewers))
+	for _, reviewer := range e.cfg.Reviewers {
+		if reviewer.ID() != e.cfg.JudgeID {
+			reviewers = append(reviewers, reviewer)
+		}
+	}
+	return reviewers
 }
 
 func (e *Engine) judge() Reviewer {
@@ -184,6 +266,26 @@ func (e *Engine) runJudge(ctx context.Context, judge Reviewer, req ChangeRequest
 	result.ReviewerID = firstNonEmpty(result.ReviewerID, judge.ID())
 	result.ReviewerName = firstNonEmpty(result.ReviewerName, judge.Name())
 	result.Round = 99
+	result.Duration = time.Since(start).String()
+	result.CreatedAt = time.Now()
+	return result
+}
+
+func (e *Engine) runConsensusJudge(ctx context.Context, judge Reviewer, req ChangeRequest, previous []ReviewerResult, round int) ReviewerResult {
+	start := time.Now()
+	result, err := judge.Review(ctx, PromptInput{
+		Request:        req,
+		Round:          round,
+		PeerReviews:    previous,
+		ConsensusJudge: true,
+		Instructions:   "Act as the consensus judge. Decide whether reviewers now agree on the actionable findings. If consensus is reached, return the final findings. If not, summarize the open disagreements that the next round must resolve.",
+	})
+	if err != nil {
+		result = ReviewerResult{ReviewerID: judge.ID(), ReviewerName: judge.Name(), Round: round, Error: err.Error()}
+	}
+	result.ReviewerID = firstNonEmpty(result.ReviewerID, judge.ID())
+	result.ReviewerName = firstNonEmpty(result.ReviewerName, judge.Name())
+	result.Round = round
 	result.Duration = time.Since(start).String()
 	result.CreatedAt = time.Now()
 	return result
@@ -290,6 +392,38 @@ func buildSummary(serviceName string, report Report) string {
 	return fmt.Sprintf("%s found %d issue(s) across %d reviewer response(s).", serviceName, len(report.Findings), len(report.Rounds)-totalErrors)
 }
 
+func buildConsensusSummary(serviceName string, report Report) string {
+	if len(report.Findings) == 0 {
+		return fmt.Sprintf("%s reached reviewer consensus with no confirmed findings.", serviceName)
+	}
+	return fmt.Sprintf("%s reached reviewer consensus with %d confirmed issue(s).", serviceName, len(report.Findings))
+}
+
+func buildDisagreementSummary(serviceName string, report Report, maxRounds int) string {
+	if len(report.OpenDisagreements) == 0 {
+		return fmt.Sprintf("%s did not reach reviewer consensus after %d round(s).", serviceName, maxRounds)
+	}
+	return fmt.Sprintf("%s did not reach reviewer consensus after %d round(s); %d disagreement(s) remain.", serviceName, maxRounds, len(report.OpenDisagreements))
+}
+
+func consensusRoundInstructions(round int) string {
+	if round <= 1 {
+		return "Review independently. Return grounded findings only. Do not assume other reviewers are correct."
+	}
+	return "Read the peer reviews and judge feedback from the previous round. State what you now agree with, what you reject as weak or false positive, what disagreement remains, and return only the findings you still believe are actionable."
+}
+
+func normalizeFindings(findings []Finding, model string) []Finding {
+	normalized := make([]Finding, 0, len(findings))
+	for _, finding := range findings {
+		finding.Severity = normalizeSeverity(finding.Severity)
+		finding.Type = firstNonEmpty(finding.Type, "bug")
+		finding.Models = uniqueAppend(finding.Models, model)
+		normalized = append(normalized, finding)
+	}
+	return normalized
+}
+
 func normalizeSeverity(severity string) string {
 	switch strings.ToLower(strings.TrimSpace(severity)) {
 	case "critical", "high", "medium", "low", "info":
@@ -357,6 +491,14 @@ func (e *Engine) store(report Report) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.jobs[report.JobID] = report
+}
+
+func (e *Engine) publish(ctx context.Context, event PublishEvent) {
+	for _, pub := range e.cfg.Publishers {
+		if err := pub.Publish(ctx, event); err != nil {
+			e.logger.Error("publish event", "job_id", event.Report.JobID, "event", event.Type, "error", err)
+		}
+	}
 }
 
 func newJobID() string {

@@ -10,6 +10,9 @@ webhook:
 review:
   max_diff_chars: 120000
   debate_rounds: 1
+  consensus_enabled: true
+  max_consensus_rounds: 3
+  judge_reviewer_id: mock-judge
   ignore_patterns:
     - "go.sum"
     - "package-lock.json"
@@ -27,6 +30,15 @@ reviewers:
     name: Mock Reviewer B
     type: mock
 
+  - id: mock-judge
+    name: Mock Judge
+    type: mock
+
 publishers:
   - id: stdout
     type: stdout
+    events:
+      - job_started
+      - reviewer_result
+      - judge_result
+      - final_report

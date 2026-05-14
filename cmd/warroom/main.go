@@ -43,13 +43,15 @@ func main() {
 	}
 
 	engine := review.NewEngine(review.EngineConfig{
-		ServiceName:    cfg.Service.Name,
-		MaxDiffChars:   cfg.Review.MaxDiffChars,
-		DebateRounds:   cfg.Review.DebateRounds,
-		Reviewers:      reviewers,
-		JudgeID:        cfg.Review.JudgeReviewerID,
-		Publishers:     publishers,
-		IgnorePatterns: cfg.Review.IgnorePatterns,
+		ServiceName:        cfg.Service.Name,
+		MaxDiffChars:       cfg.Review.MaxDiffChars,
+		DebateRounds:       cfg.Review.DebateRounds,
+		ConsensusEnabled:   cfg.Review.ConsensusEnabled,
+		MaxConsensusRounds: cfg.Review.MaxConsensusRounds,
+		Reviewers:          reviewers,
+		JudgeID:            cfg.Review.JudgeReviewerID,
+		Publishers:         publishers,
+		IgnorePatterns:     cfg.Review.IgnorePatterns,
 	}, logger)
 
 	server := &http.Server{

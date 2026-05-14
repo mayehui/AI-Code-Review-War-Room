@@ -15,14 +15,24 @@ func systemPrompt() string {
 
 func BuildPrompt(input review.PromptInput) string {
 	var b strings.Builder
-	b.WriteString("Review this merge/pull request and return strict JSON only.\n\n")
-	b.WriteString("Output schema:\n")
-	b.WriteString(`{"summary":"short summary","findings":[{"severity":"critical|high|medium|low|info","type":"bug|security|performance|maintainability|test","file":"path","line":123,"title":"specific issue","evidence":"why this is a real issue","suggestion":"concrete fix","confidence":0.0}]}` + "\n\n")
-	b.WriteString("Rules:\n")
-	b.WriteString("- Only report issues grounded in the diff or provided context.\n")
-	b.WriteString("- Prefer fewer high-confidence findings over broad guesses.\n")
-	b.WriteString("- Include file and line when possible. Use line 0 only when no line is available.\n")
-	b.WriteString("- If there are no actionable issues, return an empty findings array.\n\n")
+	if input.ConsensusJudge {
+		b.WriteString("Judge whether this merge/pull request review discussion has reached consensus. Return strict JSON only.\n\n")
+		b.WriteString("Output schema:\n")
+		b.WriteString(`{"consensus_reached":true,"consensus_summary":"short consensus status","open_disagreements":["remaining disagreement"],"final_findings":[{"severity":"critical|high|medium|low|info","type":"bug|security|performance|maintainability|test","file":"path","line":123,"title":"specific issue","evidence":"why this is a real issue","suggestion":"concrete fix","confidence":0.0}]}` + "\n\n")
+		b.WriteString("Rules:\n")
+		b.WriteString("- Set consensus_reached=true only when the reviewers agree on the actionable findings or agree there are none.\n")
+		b.WriteString("- If consensus is not reached, keep final_findings empty and list the open disagreements.\n")
+		b.WriteString("- If consensus is reached, final_findings is the final result to publish.\n\n")
+	} else {
+		b.WriteString("Review this merge/pull request and return strict JSON only.\n\n")
+		b.WriteString("Output schema:\n")
+		b.WriteString(`{"summary":"short summary","findings":[{"severity":"critical|high|medium|low|info","type":"bug|security|performance|maintainability|test","file":"path","line":123,"title":"specific issue","evidence":"why this is a real issue","suggestion":"concrete fix","confidence":0.0}]}` + "\n\n")
+		b.WriteString("Rules:\n")
+		b.WriteString("- Only report issues grounded in the diff or provided context.\n")
+		b.WriteString("- Prefer fewer high-confidence findings over broad guesses.\n")
+		b.WriteString("- Include file and line when possible. Use line 0 only when no line is available.\n")
+		b.WriteString("- If there are no actionable issues, return an empty findings array.\n\n")
+	}
 	if input.Instructions != "" {
 		b.WriteString("Round instructions:\n")
 		b.WriteString(input.Instructions)
@@ -51,8 +61,12 @@ func BuildPrompt(input review.PromptInput) string {
 func ParseModelOutput(text string) review.ReviewerResult {
 	clean := extractJSON(text)
 	var parsed struct {
-		Summary  string           `json:"summary"`
-		Findings []review.Finding `json:"findings"`
+		Summary           string           `json:"summary"`
+		Findings          []review.Finding `json:"findings"`
+		ConsensusReached  bool             `json:"consensus_reached"`
+		ConsensusSummary  string           `json:"consensus_summary"`
+		OpenDisagreements []string         `json:"open_disagreements"`
+		FinalFindings     []review.Finding `json:"final_findings"`
 	}
 	if err := json.Unmarshal([]byte(clean), &parsed); err != nil {
 		return review.ReviewerResult{
@@ -62,9 +76,13 @@ func ParseModelOutput(text string) review.ReviewerResult {
 		}
 	}
 	return review.ReviewerResult{
-		Summary:  parsed.Summary,
-		Findings: parsed.Findings,
-		Raw:      text,
+		Summary:           firstNonEmpty(parsed.Summary, parsed.ConsensusSummary),
+		Findings:          parsed.Findings,
+		ConsensusReached:  parsed.ConsensusReached,
+		ConsensusSummary:  parsed.ConsensusSummary,
+		OpenDisagreements: parsed.OpenDisagreements,
+		FinalFindings:     parsed.FinalFindings,
+		Raw:               text,
 	}
 }
 
@@ -93,4 +111,13 @@ func fallbackSummary(text string) string {
 		lines = lines[:4]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

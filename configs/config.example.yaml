@@ -18,8 +18,10 @@ scm:
 review:
   max_diff_chars: 120000
   debate_rounds: 1
-  # Optional. If empty, the service uses deterministic aggregation.
-  judge_reviewer_id: ""
+  consensus_enabled: true
+  max_consensus_rounds: 3
+  # Required when consensus_enabled is true.
+  judge_reviewer_id: openai-codex
   ignore_patterns:
     - "go.sum"
     - "package-lock.json"
@@ -81,11 +83,41 @@ reviewers:
 publishers:
   - id: stdout
     type: stdout
+    events:
+      - final_report
 
-  # Examples:
-  # - id: feishu
+  # Feishu multi-bot consensus example:
+  # - id: feishu-summary
   #   type: webhook
   #   style: feishu
+  #   events:
+  #     - job_started
+  #     - final_report
+  #   webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+  #   sign_secret: optional-sign-secret
+  #
+  # - id: feishu-kimi
+  #   type: webhook
+  #   style: feishu
+  #   events:
+  #     - reviewer_result
+  #   reviewer_id: kimi
+  #   webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+  #
+  # - id: feishu-minimax
+  #   type: webhook
+  #   style: feishu
+  #   events:
+  #     - reviewer_result
+  #   reviewer_id: minimax
+  #   webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+  #
+  # - id: feishu-judge
+  #   type: webhook
+  #   style: feishu
+  #   events:
+  #     - judge_result
+  #   reviewer_id: openai-codex
   #   webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxx
   #
   # - id: wecom
