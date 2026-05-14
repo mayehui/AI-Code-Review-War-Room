@@ -51,6 +51,7 @@ func (c *Client) GitHubChangeRequest(ctx context.Context, payload []byte) (revie
 		Author:      event.PullRequest.User.Login,
 		SourceRef:   event.PullRequest.Head.Ref,
 		TargetRef:   event.PullRequest.Base.Ref,
+		State:       githubState(event.PullRequest.State, event.PullRequest.Merged),
 		Diff:        diff,
 	}, true, nil
 }
@@ -79,6 +80,7 @@ func (c *Client) GitLabChangeRequest(ctx context.Context, payload []byte) (revie
 		Author:      event.User.Username,
 		SourceRef:   event.ObjectAttributes.SourceBranch,
 		TargetRef:   event.ObjectAttributes.TargetBranch,
+		State:       firstNonEmpty(event.ObjectAttributes.State, event.ObjectAttributes.StateID),
 		Diff:        diff,
 	}, true, nil
 }
@@ -172,7 +174,7 @@ func (c *Client) doJSON(req *http.Request, target any) error {
 
 func isGitHubReviewAction(action string) bool {
 	switch action {
-	case "opened", "reopened", "synchronize", "ready_for_review":
+	case "opened", "reopened", "synchronize", "ready_for_review", "closed":
 		return true
 	default:
 		return false
@@ -197,6 +199,13 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func githubState(state string, merged bool) string {
+	if merged {
+		return "merged"
+	}
+	return state
+}
+
 type githubPREvent struct {
 	Action     string `json:"action"`
 	Repository struct {
@@ -207,6 +216,8 @@ type githubPREvent struct {
 		Body    string `json:"body"`
 		HTMLURL string `json:"html_url"`
 		DiffURL string `json:"diff_url"`
+		State   string `json:"state"`
+		Merged  bool   `json:"merged"`
 		User    struct {
 			Login string `json:"login"`
 		} `json:"user"`
@@ -236,6 +247,8 @@ type gitlabMREvent struct {
 		Title        string `json:"title"`
 		Description  string `json:"description"`
 		URL          string `json:"url"`
+		State        string `json:"state"`
+		StateID      string `json:"state_id"`
 		SourceBranch string `json:"source_branch"`
 		TargetBranch string `json:"target_branch"`
 	} `json:"object_attributes"`

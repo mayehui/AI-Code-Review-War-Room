@@ -32,6 +32,14 @@ type Engine struct {
 
 	mu   sync.RWMutex
 	jobs map[string]Report
+
+	activeMu sync.Mutex
+	active   map[string]activeJob
+}
+
+type activeJob struct {
+	jobID  string
+	cancel context.CancelFunc
 }
 
 func NewEngine(cfg EngineConfig, logger *slog.Logger) *Engine {
@@ -39,6 +47,7 @@ func NewEngine(cfg EngineConfig, logger *slog.Logger) *Engine {
 		cfg:    cfg,
 		logger: logger,
 		jobs:   map[string]Report{},
+		active: map[string]activeJob{},
 	}
 }
 
@@ -55,7 +64,10 @@ func (e *Engine) Submit(ctx context.Context, req ChangeRequest) (string, error) 
 		StartedAt: started,
 	}
 	e.store(report)
-	go e.run(context.WithoutCancel(ctx), jobID, req, started)
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	sessionKey := req.sessionKey()
+	e.replaceActive(sessionKey, jobID, cancel, req)
+	go e.run(runCtx, sessionKey, jobID, req, started)
 	return jobID, nil
 }
 
@@ -76,9 +88,14 @@ func (e *Engine) Get(jobID string) (Report, bool) {
 	return report, ok
 }
 
-func (e *Engine) run(ctx context.Context, jobID string, req ChangeRequest, started time.Time) {
+func (e *Engine) run(ctx context.Context, sessionKey string, jobID string, req ChangeRequest, started time.Time) {
+	defer e.clearActive(sessionKey, jobID)
 	report, err := e.execute(ctx, jobID, req, started)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			e.logger.Info("review job cancelled", "job_id", jobID)
+			return
+		}
 		e.logger.Error("review job failed", "job_id", jobID, "error", err)
 		report.Status = "failed"
 		report.Summary = err.Error()
@@ -88,10 +105,27 @@ func (e *Engine) run(ctx context.Context, jobID string, req ChangeRequest, start
 }
 
 func (e *Engine) execute(ctx context.Context, jobID string, req ChangeRequest, started time.Time) (Report, error) {
+	if isMergedState(req.State) {
+		return e.executeMerged(ctx, jobID, req, started)
+	}
 	if e.cfg.ConsensusEnabled {
 		return e.executeConsensus(ctx, jobID, req, started)
 	}
 	return e.executeLegacy(ctx, jobID, req, started)
+}
+
+func (e *Engine) executeMerged(ctx context.Context, jobID string, req ChangeRequest, started time.Time) (Report, error) {
+	report := Report{
+		JobID:       jobID,
+		Status:      "merged",
+		Request:     req,
+		Summary:     fmt.Sprintf("%s skipped review because the change request is already merged.", e.cfg.ServiceName),
+		StartedAt:   started,
+		CompletedAt: time.Now(),
+	}
+	e.store(report)
+	e.publish(ctx, PublishEvent{Type: EventFinalReport, Report: report})
+	return report, nil
 }
 
 func (e *Engine) executeLegacy(ctx context.Context, jobID string, req ChangeRequest, started time.Time) (Report, error) {
@@ -99,21 +133,39 @@ func (e *Engine) executeLegacy(ctx context.Context, jobID string, req ChangeRequ
 	report := Report{JobID: jobID, Status: "running", Request: req, StartedAt: started}
 	e.store(report)
 
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	rounds := e.runRound(ctx, report, req, 1, nil, "Review independently. Do not assume other reviewers are correct.", false)
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	report.Rounds = append(report.Rounds, rounds...)
 	e.store(report)
 
 	latest := rounds
 	for round := 2; round <= e.cfg.DebateRounds+1; round++ {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		instructions := "Reconsider the merge request after reading peer reviews. Confirm real issues, reject likely false positives, and add missed high-signal findings."
 		next := e.runRound(ctx, report, req, round, latest, instructions, false)
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		report.Rounds = append(report.Rounds, next...)
 		latest = next
 		e.store(report)
 	}
 
 	if judge := e.judge(); judge != nil {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		judgeResult := e.runJudge(ctx, judge, req, report.Rounds)
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		report.Rounds = append(report.Rounds, judgeResult)
 		e.store(report)
 	}
@@ -147,12 +199,21 @@ func (e *Engine) executeConsensus(ctx context.Context, jobID string, req ChangeR
 	var latest []ReviewerResult
 	var lastJudge ReviewerResult
 	for round := 1; round <= maxRounds; round++ {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		instructions := consensusRoundInstructions(round)
 		results := e.runRound(ctx, report, req, round, latest, instructions, true)
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		report.Rounds = append(report.Rounds, results...)
 		e.store(report)
 
 		lastJudge = e.runConsensusJudge(ctx, judge, req, report.Rounds, round)
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		report.Rounds = append(report.Rounds, lastJudge)
 		report.ConsensusSummary = lastJudge.ConsensusSummary
 		report.OpenDisagreements = lastJudge.OpenDisagreements
@@ -485,6 +546,70 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func isMergedState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "merged", "merge":
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *Engine) replaceActive(sessionKey string, jobID string, cancel context.CancelFunc, req ChangeRequest) {
+	if sessionKey == "" {
+		return
+	}
+	e.activeMu.Lock()
+	previous, ok := e.active[sessionKey]
+	e.active[sessionKey] = activeJob{jobID: jobID, cancel: cancel}
+	e.activeMu.Unlock()
+	if !ok || previous.jobID == jobID {
+		return
+	}
+	if isMergedState(req.State) {
+		e.cancelDueToMerged(previous.jobID, req)
+	} else {
+		e.cancelDueToSuperseded(previous.jobID, req)
+	}
+	previous.cancel()
+}
+
+func (e *Engine) clearActive(sessionKey string, jobID string) {
+	if sessionKey == "" {
+		return
+	}
+	e.activeMu.Lock()
+	defer e.activeMu.Unlock()
+	active, ok := e.active[sessionKey]
+	if ok && active.jobID == jobID {
+		delete(e.active, sessionKey)
+	}
+}
+
+func (e *Engine) cancelDueToMerged(jobID string, req ChangeRequest) {
+	report, ok := e.Get(jobID)
+	if !ok {
+		return
+	}
+	report.Status = "cancelled_due_to_merged"
+	report.Request.State = firstNonEmpty(req.State, report.Request.State)
+	report.Summary = fmt.Sprintf("%s stopped review because the change request was merged.", e.cfg.ServiceName)
+	report.CompletedAt = time.Now()
+	e.store(report)
+}
+
+func (e *Engine) cancelDueToSuperseded(jobID string, req ChangeRequest) {
+	report, ok := e.Get(jobID)
+	if !ok {
+		return
+	}
+	report.Status = "cancelled"
+	report.Summary = fmt.Sprintf("%s stopped review because a newer event arrived for this change request.", e.cfg.ServiceName)
+	report.Request.State = firstNonEmpty(req.State, report.Request.State)
+	report.CompletedAt = time.Now()
+	e.store(report)
 }
 
 func (e *Engine) store(report Report) {

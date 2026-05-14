@@ -274,6 +274,11 @@ func writeRequestHeader(b *strings.Builder, report review.Report) {
 		b.WriteString(report.Request.URL)
 		b.WriteString("\n")
 	}
+	if report.Request.State != "" {
+		b.WriteString("**MR State:** ")
+		b.WriteString(report.Request.State)
+		b.WriteString("\n")
+	}
 }
 
 func writeFindings(b *strings.Builder, findings []review.Finding, max int) {

@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -14,7 +15,20 @@ type ChangeRequest struct {
 	Author      string `json:"author"`
 	SourceRef   string `json:"source_ref"`
 	TargetRef   string `json:"target_ref"`
+	State       string `json:"state,omitempty"`
 	Diff        string `json:"diff"`
+}
+
+func (r ChangeRequest) sessionKey() string {
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(r.Provider)),
+		strings.ToLower(strings.TrimSpace(r.Repository)),
+		strings.TrimSpace(r.URL),
+	}
+	if parts[2] == "" {
+		return ""
+	}
+	return strings.Join(parts, "\x00")
 }
 
 type PromptInput struct {
