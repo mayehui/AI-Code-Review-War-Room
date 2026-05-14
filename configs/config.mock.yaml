@@ -1,0 +1,32 @@
+service:
+  name: AI Code Review War Room
+
+server:
+  addr: ":8080"
+
+webhook:
+  secret_env: WARROOM_WEBHOOK_SECRET
+
+review:
+  max_diff_chars: 120000
+  debate_rounds: 1
+  ignore_patterns:
+    - "go.sum"
+    - "package-lock.json"
+    - "pnpm-lock.yaml"
+    - "yarn.lock"
+    - "dist/"
+    - "vendor/"
+
+reviewers:
+  - id: mock-a
+    name: Mock Reviewer A
+    type: mock
+
+  - id: mock-b
+    name: Mock Reviewer B
+    type: mock
+
+publishers:
+  - id: stdout
+    type: stdout

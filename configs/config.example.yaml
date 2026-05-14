@@ -1,0 +1,99 @@
+service:
+  name: AI Code Review War Room
+
+server:
+  addr: ":8080"
+
+webhook:
+  # Shared secret for GitHub HMAC or GitLab X-Gitlab-Token verification.
+  secret_env: WARROOM_WEBHOOK_SECRET
+
+scm:
+  github:
+    token_env: GITHUB_TOKEN
+  gitlab:
+    base_url: https://gitlab.com
+    token_env: GITLAB_TOKEN
+
+review:
+  max_diff_chars: 120000
+  debate_rounds: 1
+  # Optional. If empty, the service uses deterministic aggregation.
+  judge_reviewer_id: ""
+  ignore_patterns:
+    - "go.sum"
+    - "package-lock.json"
+    - "pnpm-lock.yaml"
+    - "yarn.lock"
+    - "dist/"
+    - "vendor/"
+
+reviewers:
+  - id: kimi
+    name: Kimi Reviewer
+    type: chat_model
+    provider: kimi
+    api_style: openai_chat_completions
+    base_url: https://api.moonshot.cn/v1
+    model: kimi-k2.6
+    api_key_env: MOONSHOT_API_KEY
+    timeout: 90s
+
+  - id: minimax
+    name: MiniMax Reviewer
+    type: chat_model
+    provider: minimax
+    api_style: openai_chat_completions
+    base_url: https://api.minimax.io/v1
+    model: MiniMax-M2
+    api_key_env: MINIMAX_API_KEY
+    timeout: 90s
+
+  - id: openai-codex
+    name: Codex Reviewer
+    type: chat_model
+    provider: openai
+    api_style: openai_responses
+    base_url: https://api.openai.com/v1
+    model: gpt-5.1-codex
+    api_key_env: OPENAI_API_KEY
+    timeout: 120s
+
+  - id: claude
+    name: Claude Reviewer
+    type: chat_model
+    provider: anthropic
+    api_style: anthropic_messages
+    base_url: https://api.anthropic.com/v1
+    model: claude-sonnet-4-5
+    api_key_env: ANTHROPIC_API_KEY
+    timeout: 120s
+    disabled: true
+
+  # Optional bridge for Codex CLI / Claude Code / internal tools. The prompt is sent on stdin.
+  - id: local-agent
+    name: Local Agent Reviewer
+    type: command
+    command: ["./scripts/reviewer-agent"]
+    timeout: 180s
+    disabled: true
+
+publishers:
+  - id: stdout
+    type: stdout
+
+  # Examples:
+  # - id: feishu
+  #   type: webhook
+  #   style: feishu
+  #   webhook_url: https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+  #
+  # - id: wecom
+  #   type: webhook
+  #   style: wecom
+  #   webhook_url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
+  #
+  # - id: slack
+  #   type: webhook
+  #   style: slack
+  #   webhook_url: https://hooks.slack.com/services/xxx
